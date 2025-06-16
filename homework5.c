@@ -112,26 +112,24 @@ int main(int argc, char **argv) {
     PetscCall(MatAssemblyBegin(A, MAT_FINAL_ASSEMBLY));
     PetscCall(MatAssemblyEnd(A, MAT_FINAL_ASSEMBLY));
     
-    // 2. 设置初始条件向量
-    Vec z;
-    PetscCall(VecCreate(PETSC_COMM_WORLD, &z));
-    PetscCall(VecSetSizes(z, PETSC_DECIDE, N));
-    PetscCall(VecSetFromOptions(z));
-    PetscCall(VecSet(z, 0.0));  // 初始化为全零
+    // 2. 设置初始条件向量   
+     // 设置初始温度分布 
+    Vec u;
+    PetscCall(VecCreate(PETSC_COMM_WORLD, &u));
+    PetscCall(VecSetSizes(u, PETSC_DECIDE, total_nodes));
+    PetscCall(VecSetFromOptions(u));
+    PetscCall(VecSet(u, 0.0));  // 初始化为0
+    VecAssemblyBegin(u);
+    VecAssemblyEnd(u);
+    Vec u_old, rhs; // 创建临时向量存储旧解和右端项
+    PetscCall(VecDuplicate(u, &u_old));
+    PetscCall(VecDuplicate(u, &rhs));
     
-    // 仅rank 0进程设置第一个元素为1
-    if (rank == 0) {
-        PetscInt idx = 0;
-        PetscScalar val = 1.0;
-        VecSetValues(z, 1, &idx, &val, INSERT_VALUES);
-    }
-    VecAssemblyBegin(z);
-    VecAssemblyEnd(z);
-    
+
     // 可选：查看初始向量
     if (view_exact) {
         PetscPrintf(PETSC_COMM_WORLD, "===== Initial Vector =====\n");
-        VecView(z, PETSC_VIEWER_STDOUT_WORLD);
+        VecView(u, PETSC_VIEWER_STDOUT_WORLD);
     }
     
     // 3. 创建KSP求解器上下文
@@ -139,65 +137,56 @@ int main(int argc, char **argv) {
     PetscCall(KSPCreate(PETSC_COMM_WORLD, &ksp));
     PetscCall(KSPSetOperators(ksp, A, A));  // 设置系统矩阵
     
-    // 设置初始的容差
-    PetscCall(KSPSetTolerances(ksp, 1e-12, 1e-12, PETSC_DEFAULT, PETSC_DEFAULT));
+    // 设置求解器
+    PetscCall(KSPSetTolerances(ksp, tol, PETSC_DEFAULT, PETSC_DEFAULT，max_steps));
     
     // 允许命令行覆盖所有求解器选项
     PetscCall(KSPSetFromOptions(ksp));
     
-    // 4. 逆幂迭代主循环
-    PetscInt    k;
-    PetscReal   lambda_prev = 0.0; // 上一次迭代的特征值
-    PetscReal   lambda_min = 0.0;  // 当前特征值（实际是A^{-1}的最大特征值）
+    // 4.时间步循环
+    PetscInt    step;
+    PetscReal   time = 0.0; 
     PetscBool   converged = PETSC_FALSE;
-    Vec         y;
-    
-    PetscCall(VecDuplicate(z, &y));
-   
-    // 主迭代循环
-    for (k = 0; k < max_iter; k++) {
+   for (step = 0; step < max_steps; step++) {
+        // 更新当前时间
+        time += dt;
+        if (time > T_final) break;
+        
+        // 保存旧解
+        PetscCall(VecCopy(u, u_old));
+        
+        // 组装右端向量 
+        PetscCall(VecCopy(u_old, rhs));
+        PetscCall(VecScale(rhs, rho_c));
+        
         // 测量求解时间 - 开始
         PetscLogDouble solve_start, solve_end;
         PetscTime(&solve_start);
         
-        // 求解线性系统 A y = z
-        PetscCall(KSPSolve(ksp, z, y));
+        // 求解线性系统 A * u = rhs
+        PetscCall(KSPSolve(ksp, rhs, u));
         
         // 测量求解时间 - 结束
         PetscTime(&solve_end);
         solve_time_total += (solve_end - solve_start);
         
-        // 计算新向量的范数 ||y||
-        PetscReal norm_y;
-        PetscCall(VecNorm(y, NORM_2, &norm_y));
+        // 计算时间步之间的变化量
+        PetscReal norm_diff;
+        PetscCall(VecAXPY(u_old, -1.0, u)); // u_old = u - u_old
+        PetscCall(VecNorm(u_old, NORM_2, &norm_diff));
         
-        // 归一化 z_new = y / ||y||
-        PetscCall(VecCopy(y, z));
-        PetscCall(VecScale(z, 1.0 / norm_y));
-        
-        // 计算正确的Rayleigh商：λ = (z^{k})^T * y^{k+1}
-        PetscReal lambda_inv;
-        PetscCall(VecDot(z, y, &lambda_inv));
-        lambda_min = PetscRealPart(lambda_inv); // A^{-1}的最大特征值
-        
-        // 检查收敛（基于特征值的变化）
-        if (k > 0) {
-            PetscReal diff_eig = PetscAbsReal(lambda_min - lambda_prev) / PetscAbsReal(lambda_min);
-            if (diff_eig < tol) {
-                converged = PETSC_TRUE;
-                break;
-            }
+        // 每10步打印进度
+        if (step % 10 == 0 && rank == 0) {
+            PetscPrintf(PETSC_COMM_WORLD, "Step %4d: Time = %.4f, Norm(delta_u) = %.4e\n", 
+                       step, (double)time, (double)norm_diff);
         }
-        lambda_prev = lambda_min;
         
-        // 每10步打印进度（仅root进程）
-        if (k % 10 == 0 && rank == 0) {
-            PetscReal actual_lambda = 1.0 / lambda_min; // A的最小特征值
-            PetscPrintf(PETSC_COMM_WORLD, "Iter %3d: lambda_min = %.6e\n", 
-                       k, (double)actual_lambda);
+        // 检查收敛
+        if (norm_diff < tol) {
+            converged = PETSC_TRUE;
+            break;
         }
     }
-    
     // 结束总时间测量
     PetscTime(&total_time_end);
     double total_elapsed_time = (double)(total_time_end - total_time_start);
