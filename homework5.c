@@ -59,40 +59,60 @@ int main(int argc, char **argv) {
     PetscInt Istart, Iend;
     PetscCall(MatGetOwnershipRange(A, &Istart, &Iend));
     
-    // 设置矩阵元素（仅处理本地部分）
-    for (PetscInt i = Istart; i < Iend; i++) {
-        PetscInt    cols[3];
-        PetscScalar vals[3];
+     // 设置矩阵元素
+    PetscReal coeff = kappa * dt / (h * h);  // 离散化系数
+    PetscReal diag_val = rho_c + 4.0 * coeff;  // 主对角线系数
+    
+    // 设置所有局部节点
+    for (PetscInt idx = Istart; idx < Iend; idx++) {
+        PetscInt    i = idx / N;  
+        PetscInt    j = idx % N; 
+        PetscInt    cols[5];
+        PetscScalar vals[5];
         PetscInt    ncols = 0;
         
-        // 左邻居（如果存在）
-        if (i > 0) {
-            cols[ncols] = i - 1;
-            vals[ncols] = -1.0;
-            ncols++;
-        }
-        
-        // 对角线元素
-        cols[ncols] = i;
-        vals[ncols] = 2.0;  // 主对角元为2
+        // 主对角线元素
+        cols[ncols] = idx;
+        vals[ncols] = diag_val;
         ncols++;
         
-        // 右邻居（如果存在）
-        if (i < N - 1) {
-            cols[ncols] = i + 1;
-            vals[ncols] = -1.0;
+        // 相邻节点：左 (i-1, j)
+        if (i > 0) {
+            cols[ncols] = idx - N;
+            vals[ncols] = -coeff;
             ncols++;
         }
         
+        // 相邻节点：右 (i+1, j)
+        if (i < N - 1) {
+            cols[ncols] = idx + N;
+            vals[ncols] = -coeff;
+            ncols++;
+        }
+        
+        // 相邻节点：下 (i, j-1)
+        if (j > 0) {
+            cols[ncols] = idx - 1;
+            vals[ncols] = -coeff;
+            ncols++;
+        }
+        
+        // 相邻节点：上 (i, j+1)
+        if (j < N - 1) {
+            cols[ncols] = idx + 1;
+            vals[ncols] = -coeff;
+            ncols++;
+        }
+     
         // 设置值
-        MatSetValues(A, 1, &i, ncols, cols, vals, INSERT_VALUES);
+        MatSetValues(A, 1, &idx, ncols, cols, vals, INSERT_VALUES);
     }
     
     // 完成矩阵装配
     PetscCall(MatAssemblyBegin(A, MAT_FINAL_ASSEMBLY));
     PetscCall(MatAssemblyEnd(A, MAT_FINAL_ASSEMBLY));
     
-    // 2. 设置初始向量 z0 = [1,0,...,0]^T
+    // 2. 设置初始条件向量
     Vec z;
     PetscCall(VecCreate(PETSC_COMM_WORLD, &z));
     PetscCall(VecSetSizes(z, PETSC_DECIDE, N));
