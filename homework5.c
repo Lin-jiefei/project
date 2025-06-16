@@ -2,21 +2,18 @@
 #include <math.h>
 
 int main(int argc, char **argv) {
-    const char *help = "Homework 5: Parallel Inverse Power Iteration for Tridiagonal Matrix\n\n"
-                       "This program calculates the smallest eigenvalue of a tridiagonal matrix using the inverse power iteration method.\n"
-                       "The matrix represents the discretization of the Poisson equation on [0,1]:\n"
-                       "  A = [ 2 -1  0 ...  0 ]\n"
-                       "      [ -1 2 -1 ...  0 ]\n"
-                       "      [ 0 -1 2  ...  0 ]\n"
-                       "      [ ... ... ... ... ]\n"
-                       "      [ 0  0  0 ...  2 ]\n\n"
-                       "Options:\n"
-                       "  -n <size>       : Matrix size (default: 10000)\n"
-                       "  -max_iter <int> : Maximum iterations (default: 1000)\n"
-                       "  -tol <value>    : Convergence tolerance (default: 1e-8)\n"
-                       "  -view_exact     : View initial vector\n"
-                       "  KSP/PC options  : Any standard PETSc options for solvers/preconditioners\n";
-    
+    const char *help = "This project solve a transient heat equation in a two-dimensional unit square"
+	"ρc∂u/∂t − κ∂2u/∂x2 = f on Ω × (0, T )"
+	"u = g on Γg × (0, T )"
+	"κ∂u/∂xnx = h on Γh × (0, T )"
+	"u|t=0 = u0 in Ω."
+	"Options:\n"
+	"  -n <size>       : Mesh size (default: 100)\n"
+	"  -dt <timestep>  : Time step size (default: 0.001)\n"
+	"  -max_steps <int> : Maximum time steps (default: 1000)\n"
+	"  -tol <value>    : Convergence tolerance (default: 1e-8)\n"
+	"  -view_solution  : View final solution\n"
+	"  KSP/PC options  : Any standard PETSc options for solvers/preconditioners\n";
     PetscFunctionBeginUser;
     PetscCall(PetscInitialize(&argc, &argv, NULL, help));
     PetscMPIInt rank;
@@ -29,30 +26,33 @@ int main(int argc, char **argv) {
 
     PetscInt    N = 10000;          // 矩阵默认大小
     PetscReal   tol = 1e-8;        // 收敛容差
-    PetscInt    max_iter = 1000;   // 最大迭代次数
     PetscBool   view_exact = PETSC_FALSE; // 是否查看精确解
-     
-
+    PetscReal   dt = 0.001;        // 时间步长
+    PetscInt    max_steps = 1000;  // 最大时间步数
+    PetscReal   T_final = 1.0;     // 模拟结束时间
+    PetscReal   kappa = 1.0;       // 热传导系数
+    PetscReal   rho_c = 1.0;       // ρc 乘积 
     // 从命令行获取参数
     PetscOptionsGetInt(NULL, NULL, "-n", &N, NULL);
     PetscOptionsGetReal(NULL, NULL, "-tol", &tol, NULL);
-    PetscOptionsGetInt(NULL, NULL, "-max_iter", &max_iter, NULL);
+        PetscOptionsGetReal(NULL, NULL, "-dt", &dt, NULL);
+    PetscOptionsGetInt(NULL, NULL, "-max_steps", &max_steps, NULL);
     PetscOptionsGetBool(NULL, NULL, "-view_exact", &view_exact, NULL);
     
     if (rank == 0) {
-        PetscPrintf(PETSC_COMM_WORLD, "=== Homework 5: Inverse Power Iteration ===\n");
-        PetscPrintf(PETSC_COMM_WORLD, "Matrix size: %d, Tolerance: %.1e, Max iterations: %d\n", 
-                    N, tol, max_iter);
+        PetscPrintf(PETSC_COMM_WORLD, "=== project ===\n");
+        PetscPrintf(PETSC_COMM_WORLD, "Matrix size: %d, Tolerance: %.1e, Max steps: %d, Time step: %.3f\n", 
+                    N, tol, max_steps, (double)dt;
     }
     
     // 1. 创建并装配矩阵 A
     Mat A;
     PetscCall(MatCreate(PETSC_COMM_WORLD, &A));
-    PetscCall(MatSetSizes(A, PETSC_DECIDE, PETSC_DECIDE, N, N));
+    PetscCall(MatSetSizes(A, PETSC_DECIDE, PETSC_DECIDE, total_nodes, total_nodes));
     PetscCall(MatSetFromOptions(A));
-    
-    // 预分配矩阵内存（三对角矩阵每行最多3个非零元素）
-    PetscInt max_nnz = 3;
+    PetscCall(MatSetUp(A));
+    // 预分配矩阵内存
+    PetscInt max_nnz = 5;
     PetscCall(MatMPIAIJSetPreallocation(A, max_nnz, NULL, max_nnz, NULL));
    
     // 获取进程的矩阵部分
