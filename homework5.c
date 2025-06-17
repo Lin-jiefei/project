@@ -33,7 +33,6 @@ int main(int argc, char **argv) {
     PetscBool   view_exact = PETSC_FALSE; // 是否查看精确解
     PetscReal   dt = 0.001;        // 时间步长
     PetscInt    max_steps = 1000;  // 最大时间步数
-    PetscReal   T_final = 1.0;     // 模拟结束时间
     PetscReal   kappa = 1.0;       // 热传导系数
     PetscReal   rho_c = 1.0;       // ρc 乘积 
     char time_method[20] = "implicit"; // 默认时间方法
@@ -79,16 +78,30 @@ int main(int argc, char **argv) {
     // 预分配矩阵内存
     PetscInt max_nnz = 5;
     PetscCall(MatMPIAIJSetPreallocation(A, max_nnz, NULL, max_nnz, NULL));
-   
+     // 显式方法拉普拉斯矩阵   
+       Mat K = NULL;
+    if (strcmp(time_method, "explicit") == 0) {
+        PetscCall(MatCreate(PETSC_COMM_WORLD, &K));
+        PetscCall(MatSetSizes(K, PETSC_DECIDE, PETSC_DECIDE, total_nodes, total_nodes));
+        PetscCall(MatSetFromOptions(K));
+    }
     // 获取进程的矩阵部分
     PetscInt Istart, Iend;
     PetscCall(MatGetOwnershipRange(A, &Istart, &Iend));
+    PetscReal coeff;
+    PetscReal diag_val;
     
-     // 设置矩阵元素
-    PetscReal coeff = kappa * dt / (h * h);  // 离散化系数
-    PetscReal diag_val = rho_c + 4.0 * coeff;  // 主对角线系数
-    
-    // 设置所有局部节点
+     // 计算隐式方法系数
+    if (strcmp(time_method, "implicit") == 0) {
+        coeff = kappa * dt / (h * h);
+        diag_val = rho_c + 4.0 * coeff;
+    } 
+    // 计算显式方法系数
+    else {
+        coeff = -kappa / (h * h);  // 符号变化
+        diag_val = 1.0;  // 显式方法不需要包含在系统矩阵中
+    }
+    // 设置矩阵元素
     for (PetscInt idx = Istart; idx < Iend; idx++) {
         PetscInt    i = idx / N;  
         PetscInt    j = idx % N; 
@@ -100,42 +113,71 @@ int main(int argc, char **argv) {
         cols[ncols] = idx;
         vals[ncols] = diag_val;
         ncols++;
-        
-        // 相邻节点：左 (i-1, j)
-        if (i > 0) {
-            cols[ncols] = idx - N;
-            vals[ncols] = -coeff;
-            ncols++;
+         // 处理显式方法的特殊逻辑
+        if (strcmp(time_method, "explicit") == 0) {
+            // 显式方法需要填充拉普拉斯矩阵
+            if (i > 0) { 
+             // 相邻节点：左 (i-1, j)
+                cols[ncols] = idx - N; 
+                vals[ncols] = coeff;
+                ncols++; 
+            }
+            if (i < N - 1) { 
+                // 相邻节点：右 (i+1, j)
+                cols[ncols] = idx + N; 
+                vals[ncols] = coeff;
+                ncols++; 
+            }
+            if (j > 0) { 
+                   // 相邻节点：下 (i, j-1)
+                cols[ncols] = idx - 1; 
+                vals[ncols] = coeff;
+                ncols++; 
+            }
+            if (j < N - 1) { 
+                  // 相邻节点：上 (i, j+1)
+                cols[ncols] = idx + 1; 
+                vals[ncols] = coeff;
+                ncols++; 
+            }
+            PetscCall(MatSetValues(K, 1, &idx, ncols, cols, vals, INSERT_VALUES));
+        } 
+        // 隐式方法的常规设置
+        else {
+            if (i > 0) { 
+                cols[ncols] = idx - N; 
+                vals[ncols] = -coeff;
+                ncols++; 
+            }
+            if (i < N - 1) { 
+                cols[ncols] = idx + N; 
+                vals[ncols] = -coeff;
+                ncols++; 
+            }
+            if (j > 0) { 
+                cols[ncols] = idx - 1; 
+                vals[ncols] = -coeff;
+                ncols++; 
+            }
+            if (j < N - 1) { 
+                cols[ncols] = idx + 1; 
+                vals[ncols] = -coeff;
+                ncols++; 
+            }
+            PetscCall(MatSetValues(A, 1, &idx, ncols, cols, vals, INSERT_VALUES));
         }
-        
-        // 相邻节点：右 (i+1, j)
-        if (i < N - 1) {
-            cols[ncols] = idx + N;
-            vals[ncols] = -coeff;
-            ncols++;
-        }
-        
-        // 相邻节点：下 (i, j-1)
-        if (j > 0) {
-            cols[ncols] = idx - 1;
-            vals[ncols] = -coeff;
-            ncols++;
-        }
-        
-        // 相邻节点：上 (i, j+1)
-        if (j < N - 1) {
-            cols[ncols] = idx + 1;
-            vals[ncols] = -coeff;
-            ncols++;
-        }
-     
-        // 设置值
-        MatSetValues(A, 1, &idx, ncols, cols, vals, INSERT_VALUES);
     }
+  
+      
     
     // 完成矩阵装配
-    PetscCall(MatAssemblyBegin(A, MAT_FINAL_ASSEMBLY));
-    PetscCall(MatAssemblyEnd(A, MAT_FINAL_ASSEMBLY));
+    if (strcmp(time_method, "explicit") == 0) {
+        PetscCall(MatAssemblyBegin(K, MAT_FINAL_ASSEMBLY));
+        PetscCall(MatAssemblyEnd(K, MAT_FINAL_ASSEMBLY));
+    } else {
+        PetscCall(MatAssemblyBegin(A, MAT_FINAL_ASSEMBLY));
+        PetscCall(MatAssemblyEnd(A, MAT_FINAL_ASSEMBLY));
+    }
     
     // 2. 设置初始条件向量   
      // 设置初始温度分布 
@@ -143,35 +185,34 @@ int main(int argc, char **argv) {
     PetscCall(VecCreate(PETSC_COMM_WORLD, &u));
     PetscCall(VecSetSizes(u, PETSC_DECIDE, total_nodes));
     PetscCall(VecSetFromOptions(u));
-    PetscCall(VecSet(u, 0.0));  // 初始化为0
-    VecAssemblyBegin(u);
-    VecAssemblyEnd(u);
+    
+    PetscCall(VecSet(u, 0.0));
+    // 设置热源（中心点）
+    PetscInt center_idx = (N/2) * N + N/2;
+    PetscScalar src_val = 1.0;
+    PetscCall(VecSetValues(u, 1, &center_idx, &src_val, INSERT_VALUES));
+    
+    PetscCall(VecAssemblyBegin(u));
+    PetscCall(VecAssemblyEnd(u));
+    
     Vec u_old, rhs; // 创建临时向量存储旧解和右端项
     PetscCall(VecDuplicate(u, &u_old));
     PetscCall(VecDuplicate(u, &rhs));
     
-
-    // 可选：查看初始向量
-    if (view_exact) {
-        PetscPrintf(PETSC_COMM_WORLD, "===== Initial Vector =====\n");
-        VecView(u, PETSC_VIEWER_STDOUT_WORLD);
-    }
-    
+  
     // 3. 创建KSP求解器上下文
-    KSP ksp;
-    PetscCall(KSPCreate(PETSC_COMM_WORLD, &ksp));
-    PetscCall(KSPSetOperators(ksp, A, A));  // 设置系统矩阵
-    
-    // 设置求解器
-    PetscCall(KSPSetTolerances(ksp, tol, PETSC_DEFAULT, PETSC_DEFAULT，max_steps));
-    
-    // 允许命令行覆盖所有求解器选项
-    PetscCall(KSPSetFromOptions(ksp));
-    
+      KSP ksp = NULL;
+    if (strcmp(time_method, "implicit") == 0) {
+        PetscCall(KSPCreate(PETSC_COMM_WORLD, &ksp));
+        PetscCall(KSPSetOperators(ksp, A, A)); // 设置系统矩阵
+        PetscCall(KSPSetTolerances(ksp, tol, PETSC_DEFAULT, PETSC_DEFAULT, max_steps));   // 设置求解器
+        PetscCall(KSPSetFromOptions(ksp));    // 允许命令行覆盖所有求解器选项
+    } 
     // 4.时间步循环
     PetscInt    step;
     PetscReal   time = 0.0; 
-    PetscBool   converged = PETSC_FALSE;
+    PetscReal   norm_diff = 0.0;
+    PetscReal   T_final = dt * max_steps;
    for (step = 0; step < max_steps; step++) {
         // 更新当前时间
         time += dt;
@@ -180,35 +221,46 @@ int main(int argc, char **argv) {
         // 保存旧解
         PetscCall(VecCopy(u, u_old));
         
-        // 组装右端向量 
-        PetscCall(VecCopy(u_old, rhs));
-        PetscCall(VecScale(rhs, rho_c));
-        
-        // 测量求解时间 - 开始
-        PetscLogDouble solve_start, solve_end;
-        PetscTime(&solve_start);
-        
-        // 求解线性系统 A * u = rhs
-        PetscCall(KSPSolve(ksp, rhs, u));
-        
-        // 测量求解时间 - 结束
-        PetscTime(&solve_end);
-        solve_time_total += (solve_end - solve_start);
-        
-        // 计算时间步之间的变化量
-        PetscReal norm_diff;
-        PetscCall(VecAXPY(u_old, -1.0, u)); // u_old = u - u_old
-        PetscCall(VecNorm(u_old, NORM_2, &norm_diff));
-        
-        // 每10步打印进度
-        if (step % 10 == 0 && rank == 0) {
-            PetscPrintf(PETSC_COMM_WORLD, "Step %4d: Time = %.4f, Norm(delta_u) = %.4e\n", 
-                       step, (double)time, (double)norm_diff);
+       // 显式欧拉法
+        if (strcmp(time_method, "explicit") == 0) {
+            PetscLogDouble solve_start, solve_end;
+            PetscTime(&solve_start);
+            
+            // 显式更新: u^{n+1} = u^n + (dt/(ρc)) * κ∇²u^n
+            PetscCall(MatMult(K, u_old, rhs));
+            PetscCall(VecScale(rhs, dt / rho_c));
+            PetscCall(VecAXPY(u, 1.0, rhs));
+            
+            PetscTime(&solve_end);
+            solve_time_total += (solve_end - solve_start);
+        } 
+        // 隐式欧拉法
+        else {
+            PetscLogDouble solve_start, solve_end;
+            PetscTime(&solve_start);
+            
+            // 右端项: ρc * u_old
+            PetscCall(VecCopy(u_old, rhs));
+            PetscCall(VecScale(rhs, rho_c));
+            
+            // 求解: A u^{n+1} = rhs
+            PetscCall(KSPSolve(ksp, rhs, u));
+            
+            PetscTime(&solve_end);
+            solve_time_total += (solve_end - solve_start);
         }
         
-        // 检查收敛
-        if (norm_diff < tol) {
-            converged = PETSC_TRUE;
+        // 计算变化量
+        PetscCall(VecAXPY(u_old, -1.0, u));
+        PetscCall(VecNorm(u_old, NORM_2, &norm_diff));
+        
+        if (step % 50 == 0 && rank == 0) {
+            PetscPrintf(PETSC_COMM_WORLD, "Step %4d: Time=%.4f, ||Δu||=%.2e\n", 
+                        step, (double)time, (double)norm_diff);
+        }
+        
+        // 简单收敛检查
+        if (norm_diff < tol && step > 10) {
             break;
         }
     }
@@ -218,15 +270,11 @@ int main(int argc, char **argv) {
     
   // 5.结果输出 
     if (rank == 0) {
-        if (converged) {
-            PetscPrintf(PETSC_COMM_WORLD, "\n===== CONVERGED =====\n");
-            PetscPrintf(PETSC_COMM_WORLD, "Time steps:     %d\n", step);
-            PetscPrintf(PETSC_COMM_WORLD, "Final time:     %.4f\n", (double)time);
-            PetscPrintf(PETSC_COMM_WORLD, "Final norm_diff: %.4e\n", (double)norm_diff);
-        } else {
-            PetscPrintf(PETSC_COMM_WORLD, "\nWARNING: Not converged after %d time steps\n", max_steps);
-            PetscPrintf(PETSC_COMM_WORLD, "Final time:     %.4f\n", (double)time);
-        }
+        PetscPrintf(PETSC_COMM_WORLD, "\n===== Results =====\n");
+        PetscPrintf(PETSC_COMM_WORLD, "Total steps: %d, Final time: %.4f\n", step, (double)time);
+        PetscPrintf(PETSC_COMM_WORLD, "Final change norm: %.4e\n", (double)norm_diff);
+        PetscPrintf(PETSC_COMM_WORLD, "Total solve time: %.4f sec\n", (double)solve_time_total);
+        PetscPrintf(PETSC_COMM_WORLD, "Total elapsed time: %.4f sec\n", total_elapsed_time);
     }
     
     // 查看最终解
@@ -236,35 +284,15 @@ int main(int argc, char **argv) {
     }
     
     
-    // 6. 性能分析
-    KSPConvergedReason reason;
-    KSPGetConvergedReason(ksp, &reason);
     
-    PetscInt its;
-    KSPGetIterationNumber(ksp, &its);
     
-    if (rank == 0) {
-        PetscPrintf(PETSC_COMM_WORLD, "\n===== Performance Summary =====\n");
-        PetscPrintf(PETSC_COMM_WORLD, "Total Time Steps:           %d\n", step);
-        PetscPrintf(PETSC_COMM_WORLD, "Total Iterations of KSP Solver:  %d\n", its);
-        PetscPrintf(PETSC_COMM_WORLD, "Total Solve Time (linear solves): %.4f sec\n", (double)solve_time_total);
-        PetscPrintf(PETSC_COMM_WORLD, "Total Elapsed Time:              %.4f sec\n", total_elapsed_time);
-        
-        if (step > 0) {
-            double avg_solve_time = solve_time_total * 1000.0 / step;
-            PetscPrintf(PETSC_COMM_WORLD, "Avg Time per Linear Solve:       %.4f ms\n", avg_solve_time);
-        }
-        
-        PetscPrintf(PETSC_COMM_WORLD, "Converged Reason:               %s\n", KSPConvergedReasons[reason]);
-    }
-    
-    // 7. 资源清理
+    // 6. 资源清理
     VecDestroy(&u);
     VecDestroy(&u_old);
     VecDestroy(&rhs);
     MatDestroy(&A);
-    KSPDestroy(&ksp);
-    
+      if (K) MatDestroy(&K);
+    if (ksp) KSPDestroy(&ksp);
     PetscFinalize();
     return 0;
 }
