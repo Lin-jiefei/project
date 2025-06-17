@@ -1,6 +1,19 @@
 #include <petscksp.h>
+#include <petscviewerhdf5.h> 
 #include <math.h>
 #include <string.h> 
+#include <assert.h>  
+//添加重启数据结构
+typedef struct {
+    PetscInt iteration;
+    PetscReal time;
+    PetscReal dt;
+    PetscReal h;
+    PetscInt N;
+    PetscScalar kappa;
+    PetscScalar rho_c;
+} RestartData;
+
 int main(int argc, char **argv) {
     const char *help = "This project solve a transient heat equation in a two-dimensional unit square"
 	"ρc∂u/∂t − κ∂2u/∂x2 = f on Ω × (0, T )"
@@ -18,8 +31,21 @@ int main(int argc, char **argv) {
 	"  KSP/PC options  : Any standard PETSc options for solvers/preconditioners\n";
 	"  -kappa <value>  : Thermal conductivity (default: 1.0)\n"
 	"  -rho_c <value>  : Density * specific heat (default: 1.0)\n"
+	"  -enable_restart : Enable HDF5 restart functionality (default: PETSC_FALSE)\n"
+        "  -restart_interval: Restart file save interval (default: 10)\n"
+        "  -restart_file   : Filename for restart data (default: \"restart.h5\")\n"; 
+    
     PetscFunctionBeginUser;
     PetscCall(PetscInitialize(&argc, &argv, NULL, help));
+      // 添加重启功能所需变量
+    RestartData restart_data = {0};
+    PetscBool enable_restart = PETSC_FALSE;
+    PetscInt restart_interval = 10;
+    char restart_file[256] = "restart.h5"; 
+    PetscCall(PetscOptionsGetBool(NULL, NULL, "-enable_restart", &enable_restart, NULL));
+    PetscCall(PetscOptionsGetInt(NULL, NULL, "-restart_interval", &restart_interval, NULL));
+    PetscCall(PetscOptionsGetString(NULL, NULL, "-restart_file", restart_file, sizeof(restart_file), NULL));
+
     PetscMPIInt rank;
     PetscCallMPI(MPI_Comm_rank(PETSC_COMM_WORLD, &rank));
         // 添加时间测量
@@ -46,6 +72,12 @@ int main(int argc, char **argv) {
     PetscCall(PetscOptionsGetString(NULL, NULL, "-time_method", time_method, sizeof(time_method), NULL));
     PetscCall(PetscOptionsGetReal(NULL, NULL, "-kappa", &kappa, NULL));
     PetscCall(PetscOptionsGetReal(NULL, NULL, "-rho_c", &rho_c, NULL));
+    // 参数验证
+    assert(kappa > 0.0 && "Heat conductivity must be positive");
+    assert(rho_c > 0.0 && "Density * specific heat must be positive");
+    assert(N > 1 && "Mesh size must be greater than 1");
+    assert(dt > 0.0 && "Time step must be positive");
+    
     PetscInt total_nodes = N * N;
     PetscReal h = 1.0 / (N - 1);
     if (rank == 0) {
@@ -53,6 +85,11 @@ int main(int argc, char **argv) {
         PetscPrintf(PETSC_COMM_WORLD, "Method: %s Euler, Mesh: %d, dt: %.4f, Steps: %d, Tol: %.1e\n", 
                     time_method, N, (double)dt, max_steps, tol);
         PetscPrintf(PETSC_COMM_WORLD, "Physical params: kappa=%.2f, rho_c=%.2f\n", (double)kappa, (double)rho_c);
+        
+        if (enable_restart) {
+            PetscPrintf(PETSC_COMM_WORLD, "Restart enabled: Interval %d steps, File: %s\n", 
+                        restart_interval, restart_file);
+        }
     }
 	//稳定性分析 
  	if (rank == 0) {
@@ -70,7 +107,7 @@ int main(int argc, char **argv) {
         }
     }
     // 1. 创建并装配矩阵 A
-    Mat A;
+    Mat A, K = NULL;
     PetscCall(MatCreate(PETSC_COMM_WORLD, &A));
     PetscCall(MatSetSizes(A, PETSC_DECIDE, PETSC_DECIDE, total_nodes, total_nodes));
     PetscCall(MatSetFromOptions(A));
@@ -79,7 +116,6 @@ int main(int argc, char **argv) {
     PetscInt max_nnz = 5;
     PetscCall(MatMPIAIJSetPreallocation(A, max_nnz, NULL, max_nnz, NULL));
      // 显式方法拉普拉斯矩阵   
-       Mat K = NULL;
     if (strcmp(time_method, "explicit") == 0) {
         PetscCall(MatCreate(PETSC_COMM_WORLD, &K));
         PetscCall(MatSetSizes(K, PETSC_DECIDE, PETSC_DECIDE, total_nodes, total_nodes));
@@ -181,21 +217,31 @@ int main(int argc, char **argv) {
     
     // 2. 设置初始条件向量   
      // 设置初始温度分布 
-    Vec u;
+    Vec u, u_old, rhs;// 创建临时向量存储旧解和右端项
     PetscCall(VecCreate(PETSC_COMM_WORLD, &u));
     PetscCall(VecSetSizes(u, PETSC_DECIDE, total_nodes));
     PetscCall(VecSetFromOptions(u));
-    
+    // 重启文件加载
+    if (enable_restart && restart_data.iteration > 0) {
+        PetscViewer viewer;
+        PetscCall(PetscViewerHDF5Open(PETSC_COMM_WORLD, restart_file, FILE_MODE_READ, &viewer));
+        PetscCall(VecLoad(u, viewer));
+        PetscCall(PetscViewerDestroy(&viewer));
+        
+        if (rank == 0) {
+            PetscPrintf(PETSC_COMM_WORLD, "Restarting from iteration %d, time %.4f\n", 
+                        restart_data.iteration, restart_data.time);
+        }
+    } else {
     PetscCall(VecSet(u, 0.0));
     // 设置热源（中心点）
     PetscInt center_idx = (N/2) * N + N/2;
     PetscScalar src_val = 1.0;
     PetscCall(VecSetValues(u, 1, &center_idx, &src_val, INSERT_VALUES));
-    
+    }
     PetscCall(VecAssemblyBegin(u));
     PetscCall(VecAssemblyEnd(u));
-    
-    Vec u_old, rhs; // 创建临时向量存储旧解和右端项
+ 
     PetscCall(VecDuplicate(u, &u_old));
     PetscCall(VecDuplicate(u, &rhs));
     
@@ -209,14 +255,12 @@ int main(int argc, char **argv) {
         PetscCall(KSPSetFromOptions(ksp));    // 允许命令行覆盖所有求解器选项
     } 
     // 4.时间步循环
-    PetscInt    step;
-    PetscReal   time = 0.0; 
+    PetscInt step = restart_data.iteration;
+    PetscReal time = restart_data.time;
     PetscReal   norm_diff = 0.0;
-    PetscReal   T_final = dt * max_steps;
    for (step = 0; step < max_steps; step++) {
         // 更新当前时间
         time += dt;
-        if (time > T_final) break;
         
         // 保存旧解
         PetscCall(VecCopy(u, u_old));
@@ -258,7 +302,32 @@ int main(int argc, char **argv) {
             PetscPrintf(PETSC_COMM_WORLD, "Step %4d: Time=%.4f, ||Δu||=%.2e\n", 
                         step, (double)time, (double)norm_diff);
         }
-        
+        // 定期保存重启文件
+        if (enable_restart && (step % restart_interval == 0)) {
+            PetscViewer viewer;
+            PetscCall(PetscViewerHDF5Open(PETSC_COMM_WORLD, restart_file, FILE_MODE_WRITE, &viewer));
+            
+            // 保存元数据
+            restart_data.iteration = step;
+            restart_data.time = time;
+            restart_data.dt = dt;
+            restart_data.h = h;
+            restart_data.N = N;
+            restart_data.kappa = kappa;
+            restart_data.rho_c = rho_c;
+            
+            PetscCall(PetscObjectSetName((PetscObject)&restart_data, "restart_data"));
+            PetscCall(PetscViewerHDF5WriteObject(viewer, (PetscObject)&restart_data));
+            
+            // 保存解向量
+            PetscCall(VecView(u, viewer));
+            
+            PetscCall(PetscViewerDestroy(&viewer));
+            
+            if (rank == 0) {
+                PetscPrintf(PETSC_COMM_WORLD, "Saved restart file at step %d\n", step);
+            }
+        }
         // 简单收敛检查
         if (norm_diff < tol && step > 10) {
             break;
@@ -283,16 +352,13 @@ int main(int argc, char **argv) {
         VecView(u, PETSC_VIEWER_STDOUT_WORLD);
     }
     
-    
-    
-    
-    // 6. 资源清理
-    VecDestroy(&u);
-    VecDestroy(&u_old);
-    VecDestroy(&rhs);
-    MatDestroy(&A);
-      if (K) MatDestroy(&K);
-    if (ksp) KSPDestroy(&ksp);
+       // 防御性资源清理
+    if (u) PetscCall(VecDestroy(&u));
+    if (u_old) PetscCall(VecDestroy(&u_old));
+    if (rhs) PetscCall(VecDestroy(&rhs));
+    if (A) PetscCall(MatDestroy(&A));
+    if (K) PetscCall(MatDestroy(&K));
+    if (ksp) PetscCall(KSPDestroy(&ksp));
     PetscFinalize();
     return 0;
 }
