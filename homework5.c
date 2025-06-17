@@ -191,26 +191,25 @@ int main(int argc, char **argv) {
     PetscTime(&total_time_end);
     double total_elapsed_time = (double)(total_time_end - total_time_start);
     
-    // 5. 结果输出
-    PetscReal actual_lambda = 1.0 / lambda_min; // 实际的最小特征值
-    PetscReal exact_min = 4.0 * PetscSinReal(PETSC_PI/(2*(N+1))) * 
-                          PetscSinReal(PETSC_PI/(2*(N+1)));
-    
-    if (converged) {
-        PetscReal error = PetscAbsReal(actual_lambda - exact_min) / exact_min;
-        
-        if (rank == 0) {
+  // 5.结果输出 
+    if (rank == 0) {
+        if (converged) {
             PetscPrintf(PETSC_COMM_WORLD, "\n===== CONVERGED =====\n");
-            PetscPrintf(PETSC_COMM_WORLD, "Iterations:   %d\n", k);
-            PetscPrintf(PETSC_COMM_WORLD, "Computed Min Eigenvalue: %.12e\n", (double)actual_lambda);
-            PetscPrintf(PETSC_COMM_WORLD, "Exact Min Eigenvalue:    %.12e\n", (double)exact_min);
-            PetscPrintf(PETSC_COMM_WORLD, "Relative Error:          %.4e\n", (double)error);
+            PetscPrintf(PETSC_COMM_WORLD, "Time steps:     %d\n", step);
+            PetscPrintf(PETSC_COMM_WORLD, "Final time:     %.4f\n", (double)time);
+            PetscPrintf(PETSC_COMM_WORLD, "Final norm_diff: %.4e\n", (double)norm_diff);
+        } else {
+            PetscPrintf(PETSC_COMM_WORLD, "\nWARNING: Not converged after %d time steps\n", max_steps);
+            PetscPrintf(PETSC_COMM_WORLD, "Final time:     %.4f\n", (double)time);
         }
-    } else if (rank == 0) {
-        PetscPrintf(PETSC_COMM_WORLD, "\nWARNING: Not converged after %d iterations\n", max_iter);
-        PetscPrintf(PETSC_COMM_WORLD, "Computed Min Eigenvalue: %.12e\n", (double)actual_lambda);
-        PetscPrintf(PETSC_COMM_WORLD, "Exact Min Eigenvalue:    %.12e\n", (double)exact_min);
     }
+    
+    // 查看最终解
+    if (view_exact) {
+        PetscPrintf(PETSC_COMM_WORLD, "===== Final Solution =====\n");
+        VecView(u, PETSC_VIEWER_STDOUT_WORLD);
+    }
+    
     
     // 6. 性能分析
     KSPConvergedReason reason;
@@ -221,13 +220,13 @@ int main(int argc, char **argv) {
     
     if (rank == 0) {
         PetscPrintf(PETSC_COMM_WORLD, "\n===== Performance Summary =====\n");
+        PetscPrintf(PETSC_COMM_WORLD, "Total Time Steps:           %d\n", step);
         PetscPrintf(PETSC_COMM_WORLD, "Total Iterations of KSP Solver:  %d\n", its);
-        PetscPrintf(PETSC_COMM_WORLD, "Total Inverse Iterations:       %d\n", k);
         PetscPrintf(PETSC_COMM_WORLD, "Total Solve Time (linear solves): %.4f sec\n", (double)solve_time_total);
         PetscPrintf(PETSC_COMM_WORLD, "Total Elapsed Time:              %.4f sec\n", total_elapsed_time);
         
-        if (k > 0) {
-            double avg_solve_time = solve_time_total * 1000.0 / k;
+        if (step > 0) {
+            double avg_solve_time = solve_time_total * 1000.0 / step;
             PetscPrintf(PETSC_COMM_WORLD, "Avg Time per Linear Solve:       %.4f ms\n", avg_solve_time);
         }
         
@@ -235,8 +234,9 @@ int main(int argc, char **argv) {
     }
     
     // 7. 资源清理
-    VecDestroy(&z);
-    VecDestroy(&y);
+    VecDestroy(&u);
+    VecDestroy(&u_old);
+    VecDestroy(&rhs);
     MatDestroy(&A);
     KSPDestroy(&ksp);
     
