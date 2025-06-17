@@ -1,12 +1,14 @@
 #include <petscksp.h>
 #include <math.h>
-
+#include <string.h> 
 int main(int argc, char **argv) {
     const char *help = "This project solve a transient heat equation in a two-dimensional unit square"
 	"ρc∂u/∂t − κ∂2u/∂x2 = f on Ω × (0, T )"
 	"u = g on Γg × (0, T )"
 	"κ∂u/∂xnx = h on Γh × (0, T )"
 	"u|t=0 = u0 in Ω."
+	"  - Finite difference spatial discretization\n"
+	"  - Explicit/Implicit Euler time marching schemes\n\n"
 	"Options:\n"
 	"  -n <size>       : Mesh size (default: 100)\n"
 	"  -dt <timestep>  : Time step size (default: 0.001)\n"
@@ -14,6 +16,8 @@ int main(int argc, char **argv) {
 	"  -tol <value>    : Convergence tolerance (default: 1e-8)\n"
 	"  -view_solution  : View final solution\n"
 	"  KSP/PC options  : Any standard PETSc options for solvers/preconditioners\n";
+	"  -kappa <value>  : Thermal conductivity (default: 1.0)\n"
+	"  -rho_c <value>  : Density * specific heat (default: 1.0)\n"
     PetscFunctionBeginUser;
     PetscCall(PetscInitialize(&argc, &argv, NULL, help));
     PetscMPIInt rank;
@@ -32,19 +36,40 @@ int main(int argc, char **argv) {
     PetscReal   T_final = 1.0;     // 模拟结束时间
     PetscReal   kappa = 1.0;       // 热传导系数
     PetscReal   rho_c = 1.0;       // ρc 乘积 
+    char time_method[20] = "implicit"; // 默认时间方法
+
     // 从命令行获取参数
     PetscOptionsGetInt(NULL, NULL, "-n", &N, NULL);
     PetscOptionsGetReal(NULL, NULL, "-tol", &tol, NULL);
-        PetscOptionsGetReal(NULL, NULL, "-dt", &dt, NULL);
+    PetscOptionsGetReal(NULL, NULL, "-dt", &dt, NULL);
     PetscOptionsGetInt(NULL, NULL, "-max_steps", &max_steps, NULL);
     PetscOptionsGetBool(NULL, NULL, "-view_exact", &view_exact, NULL);
-    
+    PetscCall(PetscOptionsGetString(NULL, NULL, "-time_method", time_method, sizeof(time_method), NULL));
+    PetscCall(PetscOptionsGetReal(NULL, NULL, "-kappa", &kappa, NULL));
+    PetscCall(PetscOptionsGetReal(NULL, NULL, "-rho_c", &rho_c, NULL));
+    PetscInt total_nodes = N * N;
+    PetscReal h = 1.0 / (N - 1);
     if (rank == 0) {
-        PetscPrintf(PETSC_COMM_WORLD, "=== project ===\n");
-        PetscPrintf(PETSC_COMM_WORLD, "Matrix size: %d, Tolerance: %.1e, Max steps: %d, Time step: %.3f\n", 
-                    N, tol, max_steps, (double)dt;
+        PetscPrintf(PETSC_COMM_WORLD, "=== Transient Heat Equation Solver ===\n");
+        PetscPrintf(PETSC_COMM_WORLD, "Method: %s Euler, Mesh: %d, dt: %.4f, Steps: %d, Tol: %.1e\n", 
+                    time_method, N, (double)dt, max_steps, tol);
+        PetscPrintf(PETSC_COMM_WORLD, "Physical params: kappa=%.2f, rho_c=%.2f\n", (double)kappa, (double)rho_c);
     }
-    
+	//稳定性分析 
+ 	if (rank == 0) {
+        PetscReal alpha = kappa * dt / (rho_c * h * h);
+        PetscPrintf(PETSC_COMM_WORLD, "\n=== Stability Analysis ===\n");
+        PetscPrintf(PETSC_COMM_WORLD, "CFL number (α) = %.4f\n", (double)alpha);
+        
+        if (strcmp(time_method, "explicit") == 0) {
+            PetscPrintf(PETSC_COMM_WORLD, "Explicit Euler stability condition: α < 0.25\n");
+            if (alpha > 0.25) {
+                PetscPrintf(PETSC_COMM_WORLD, "WARNING: CFL condition violated! Simulation may be unstable.\n");
+            }
+        } else {
+            PetscPrintf(PETSC_COMM_WORLD, "Implicit Euler is unconditionally stable\n");
+        }
+    }
     // 1. 创建并装配矩阵 A
     Mat A;
     PetscCall(MatCreate(PETSC_COMM_WORLD, &A));
