@@ -7,11 +7,7 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-//添加重启数据结构
-typedef struct {
-    PetscInt iteration;
-    PetscReal time;
-} RestartData;
+
 //为MMS添加函数原型
 PetscScalar manufactured_solution(PetscReal x, PetscReal y, PetscReal t);
 PetscScalar manufactured_source(PetscReal x, PetscReal y, PetscReal t, PetscReal kappa, PetscReal rho_c);
@@ -29,15 +25,18 @@ int main(int argc, char **argv) {
 	"  -dt <timestep>        : Time step size (default: 0.001)\n"
 	"  -max_steps <int>      : Maximum time steps (default: 1000)\n"
 	"  -time_method <str>    : 'implicit' or 'explicit' (default: implicit)\n"
-	"  -view_solution        : View final solution\n"
-	"  -mms		         : Use Method of Manufactured Solutions for verification (default: PETSC_FALSE)\n"
-	"   KSP/PC options       : Any standard PETSc options for solvers/preconditioners\n";
 	"  -kappa <value>        : Thermal conductivity (default: 1.0)\n"
 	"  -rho_c <value>        : Density * specific heat (default: 1.0)\n"
-	"  -enable_restart <int> : Enable HDF5 restart functionality (default: PETSC_FALSE)\n"
-	"  -restart_interval     : Restart file save interval (default: 10)\n"
-	"  -restart_file         : Filename for restart data (default: \"restart.h5\")\n"; 
-	"  -vtk_output           : Enable VTK output for visualization (default: PETSC_FALSE)\n"
+	"   Verification & I/O Options:\n"
+	"  -mms                    : Use Method of Manufactured Solutions for verification (default: PETSC_FALSE)\n"
+	"  -enable_restart         : Enable saving restart files (default: PETSC_FALSE)\n"
+	"  -restart_interval <int> : Iteration interval to save restart file (default: 10)\n"
+	"  -restart_load <file>    : Load solution from a restart file to resume simulation\n"
+	"  -vtk_output             : Enable VTK output for visualization (default: PETSC_FALSE)\n"
+	"  -vtk_interval <int>     : Iteration interval to save VTK file (default: 10, same as restart_interval)\n"
+	"  -view_solution          : View final solution vector in terminal\n\n"
+	"Performance Analysis:\n"
+	"  Run with -log_view to see detailed performance metrics, including registered events for assembly and solve times.\n";
 	PetscFunctionBeginUser;
 	PetscCall(PetscInitialize(&argc, &argv, NULL, help));
 
@@ -48,7 +47,7 @@ int main(int argc, char **argv) {
 	PetscCall(PetscLogEventRegister("Matrix Assembly", MAT_CLASSID, &ASSEMBLY_TIME));
 	PetscCall(PetscLogEventRegister("Linear Solve",    KSP_CLASSID,  &SOLVE_TIME));
 	// 参数定义
-	PetscInt    N = 10000;          // 矩阵默认大小
+	PetscInt    N = 100;          // 矩阵默认大小
 	PetscBool   view_solution = PETSC_FALSE; // 是否查看最终解
 	PetscBool   use_mms = PETSC_FALSE; // 是否使用mms
 	PetscReal   dt = 0.001;        // 时间步长
@@ -73,22 +72,23 @@ int main(int argc, char **argv) {
 	PetscCall(PetscOptionsGetReal(NULL, NULL, "-rho_c", &rho_c, NULL));
 	PetscCall(PetscOptionsGetBool(NULL, NULL, "-mms", &use_mms, NULL));
 	PetscCall(PetscOptionsGetBool(NULL, NULL, "-enable_restart", &enable_restart, NULL));
-	PetscCall(PetscOptionsGetInt(NULL, NULL, "-restart_interval", &restart_interval, NULL));
+	PetscCall(PetscOptionsGetInt(NULL, NULL, "-restart_interval", &io_interval, NULL));
 	PetscCall(PetscOptionsGetString(NULL, NULL, "-restart_load", restart_load_file, sizeof(restart_load_file), &restart_load_flag));
 	PetscCall(PetscOptionsGetBool(NULL, NULL, "-vtk_output", &vtk_output, NULL));
+	PetscCall(PetscOptionsGetInt(NULL, NULL, "-vtk_interval", &io_interval, NULL));     
 	// 参数验证
 	assert(kappa > 0.0 && "Heat conductivity must be positive");
 	assert(rho_c > 0.0 && "Density * specific heat must be positive");
 	assert(N > 1 && "Mesh size must be greater than 1");
 	assert(dt > 0.0 && "Time step must be positive");
-    
+	assert(io_interval > 0 && "I/O interval must be positive");
+	
 	PetscInt total_nodes = N * N;
-	PetscReal h = 1.0 / (N - 1);
-	// 初始化 RestartData
-	RestartData restart_data = {0, 0.0};
+	PetscReal h = 1.0 / (PetscReal)(N - 1);
+
 	PetscInt    start_step = 0;
 	PetscReal   time = 0.0;
-	// 重启加载逻辑
+	// 创建解向量
 	Vec u;
 	PetscCall(VecCreate(PETSC_COMM_WORLD, &u));
 	PetscCall(VecSetSizes(u, PETSC_DECIDE, total_nodes));
@@ -100,20 +100,28 @@ int main(int argc, char **argv) {
 	PetscCall(PetscViewerHDF5Open(PETSC_COMM_WORLD, restart_load_file, FILE_MODE_READ, &viewer));
 	PetscCall(VecLoad(u, viewer));
 	// 加载元数据
-	PetscCall(PetscViewerHDF5PushGroup(viewer, "/restart_data"));
-	PetscCall(PetscViewerHDF5ReadAttribute(viewer, "time", "time", PETSC_REAL, &restart_data.time));
-	PetscCall(PetscViewerHDF5ReadAttribute(viewer, "iteration", "iteration", PETSC_INT, &restart_data.iteration));
+	PetscCall(PetscViewerHDF5PushGroup(viewer, "/")); // HDF5 attributes are on the root group by default
+	PetscInt  loaded_N;
+	PetscCall(PetscViewerHDF5ReadAttribute(viewer, "N", "N", PETSC_INT, NULL, &loaded_N));
+	PetscCall(PetscViewerHDF5ReadAttribute(viewer, "dt", "dt", PETSC_REAL, NULL, &dt));
+	PetscCall(PetscViewerHDF5ReadAttribute(viewer, "kappa", "kappa", PETSC_REAL, NULL, &kappa));
+	PetscCall(PetscViewerHDF5ReadAttribute(viewer, "rho_c", "rho_c", PETSC_REAL, NULL, &rho_c));
+	PetscCall(PetscViewerHDF5ReadAttribute(viewer, "time", "time", PETSC_REAL, NULL, &time));
+	PetscCall(PetscViewerHDF5ReadAttribute(viewer, "iteration", "iteration", PETSC_INT, NULL, &start_step));
 	PetscCall(PetscViewerHDF5PopGroup(viewer));
-	PetscCall(PetscViewerDestroy(&viewer));
         
-	start_step = restart_data.iteration + 1;
-	time = restart_data.time;
-	
+	PetscCall(PetscViewerDestroy(&viewer));
+
+	// 检查加载的网格大小是否与当前设置匹配
+	if (loaded_N != N) {
+	SETERRQ(PETSC_COMM_WORLD, PETSC_ERR_ARG_WRONG, "Restart file was saved with N=%d, but current setting is N=%d. Sizes must match.", loaded_N, N);
+	}
+	start_step++; // Resume from the next step
 	if (rank == 0) {
-	PetscPrintf(PETSC_COMM_WORLD, "Restarting from file %s at step %d, time %.4f\n", restart_load_file, start_step, (double)time);
+	PetscPrintf(PETSC_COMM_WORLD, "Restarting from file %s. Resuming at step %d, time %.4f\n", restart_load_file, start_step, (double)time);
 		}
 	}
-	
+
 	if (rank == 0) {
 	PetscPrintf(PETSC_COMM_WORLD, "=== 2D Transient Heat Equation Solver ===\n");
 	PetscPrintf(PETSC_COMM_WORLD, "Grid: %dx%d (h=%.4f), Time Method: %s, dt: %.4f, Max Steps: %d\n", N, N, (double)h, time_method, (double)dt, max_steps);
@@ -139,11 +147,12 @@ int main(int argc, char **argv) {
 	// 预分配矩阵内存
 	PetscInt max_nnz = 5;
 	PetscCall(MatMPIAIJSetPreallocation(A, max_nnz, NULL, max_nnz, NULL));
-	
+	PetscCall(MatSeqAIJSetPreallocation(A, max_nnz, NULL));
 	// 获取进程的矩阵部分
 	PetscCall(PetscLogEventBegin(ASSEMBLY_TIME, 0, 0, 0, 0));
 	PetscInt Istart, Iend;
 	PetscCall(MatGetOwnershipRange(A, &Istart, &Iend));
+	PetscBool is_implicit = (strcmp(time_method, "implicit") == 0);
 	
 	for (PetscInt idx = Istart; idx < Iend; idx++) {
 	PetscInt i = idx / N;
@@ -160,154 +169,249 @@ int main(int argc, char **argv) {
 	PetscScalar vals[5];
 	PetscInt    ncols = 0;
 	// 对角线
-	cols[ncols] = idx;
-	vals[ncols] = (strcmp(time_method, "implicit") == 0) ? (rho_c + 4.0 * kappa * dt / (h * h)) : rho_c;
-	ncols++;
-            
-	PetscScalar off_diag = (strcmp(time_method, "implicit") == 0) ? (-kappa * dt / (h * h)) : (kappa * dt / (h * h));
-
-	// 四个邻居点
-	cols[ncols] = idx - N; vals[ncols] = off_diag; ncols++; // (i-1, j)
-	cols[ncols] = idx + N; vals[ncols] = off_diag; ncols++; // (i+1, j)
-	cols[ncols] = idx - 1; vals[ncols] = off_diag; ncols++; // (i, j-1)
-	cols[ncols] = idx + 1; vals[ncols] = off_diag; ncols++; // (i, j+1)
-            
-	PetscCall(MatSetValues(A, 1, &idx, ncols, cols, vals, INSERT_VALUES));
-		}
-	}
+	if (is_implicit) {
+                // IMPLICIT: A = (ρc*I - Δt*κ*∇²)
+                // Diagonal term: ρc + 4*κ*Δt/h²
+                // Off-diagonal term: -κ*Δt/h²
+                vals[0] = rho_c + 4.0 * kappa * dt / (h * h);
+                vals[1] = -kappa * dt / (h * h);
+                vals[2] = -kappa * dt / (h * h);
+                vals[3] = -kappa * dt / (h * h);
+                vals[4] = -kappa * dt / (h * h);
+            } else {
+                // EXPLICIT: A = κ*∇²
+                // Diagonal term: -4*κ/h²
+                // Off-diagonal term: κ/h²
+                vals[0] = -4.0 * kappa / (h * h);
+                vals[1] = kappa / (h * h);
+                vals[2] = kappa / (h * h);
+                vals[3] = kappa / (h * h);
+                vals[4] = kappa / (h * h);
+            }
+            cols[0] = idx;
+            cols[1] = idx - N; // (i-1, j)
+            cols[2] = idx + N; // (i+1, j)
+            cols[3] = idx - 1; // (i, j-1)
+            cols[4] = idx + 1; // (i, j+1)
+            PetscCall(MatSetValues(A, 1, &idx, 5, cols, vals, INSERT_VALUES));
+        }
+    }
 	PetscCall(MatAssemblyBegin(A, MAT_FINAL_ASSEMBLY));
 	PetscCall(MatAssemblyEnd(A, MAT_FINAL_ASSEMBLY));
 	PetscCall(PetscLogEventEnd(ASSEMBLY_TIME, 0, 0, 0, 0));
 	// 2. 设置初始条件向量   
 	// 设置初始温度分布 
-	Vec u, u_old, rhs;// 创建临时向量存储旧解和右端项
-	PetscCall(VecCreate(PETSC_COMM_WORLD, &u));
-	PetscCall(VecSetSizes(u, PETSC_DECIDE, total_nodes));
-	PetscCall(VecSetFromOptions(u));
-	// 重启文件加载
-	if (enable_restart && restart_data.iteration > 0) {
-	PetscViewer viewer;
-	PetscCall(PetscViewerHDF5Open(PETSC_COMM_WORLD, restart_file, FILE_MODE_READ, &viewer));
-	PetscCall(VecLoad(u, viewer));
-	PetscCall(PetscViewerDestroy(&viewer));
-        
-	if (rank == 0) {
-	PetscPrintf(PETSC_COMM_WORLD, "Restarting from iteration %d, time %.4f\n", 
-	restart_data.iteration, restart_data.time);
-		}
-	}
-	else {
-	PetscCall(VecSet(u, 0.0));
-	//设置热源（中心点）
-	PetscInt center_idx = (N/2) * N + N/2;
-	PetscScalar src_val = 1.0;
-	PetscCall(VecSetValues(u, 1, &center_idx, &src_val, INSERT_VALUES));
-	}
-	PetscCall(VecAssemblyBegin(u));
-	PetscCall(VecAssemblyEnd(u));
- 
+	Vec u_old, rhs, f_vec;
 	PetscCall(VecDuplicate(u, &u_old));
 	PetscCall(VecDuplicate(u, &rhs));
+	PetscCall(VecDuplicate(u, &f_vec));
+	PetscCall(PetscObjectSetName((PetscObject)f_vec, "forcing_term"));
+	// 重启文件加载
+	// 设置初始条件 (仅在不从重启文件加载时)
+	if (!restart_load_flag) {
+	PetscScalar *u_arr;
+	PetscCall(VecGetArray(u, &u_arr));
+	PetscCall(VecGetOwnershipRange(u, &Istart, &Iend)); // Istart/Iend need to be for the vector
+	for (PetscInt idx = Istart; idx < Iend; idx++) {
+	PetscInt i = idx / N;
+	PetscInt j = idx % N;
+	if (use_mms) {
+	u_arr[idx - Istart] = manufactured_solution((PetscReal)j * h, (PetscReal)i * h, 0.0);
+	} else {
+	// 默认初始条件：狄利克雷边界为0，内部为0，除了中心热点
+	if (i == 0 || i == N - 1 || j == 0 || j == N - 1) {
+	u_arr[idx-Istart] = 0.0;
+		} else if (i == N / 2 && j == N / 2) {
+			u_arr[idx-Istart] = 1.0;
+			} else {
+				u_arr[idx-Istart] = 0.0;
+			}
+		}
+	}
+	PetscCall(VecRestoreArray(u, &u_arr));
+	}
     
-	// 3. 创建KSP求解器上下文
+	// 3. 创建KSP求解器上下文 (仅用于隐式方法)
 	KSP ksp = NULL;
-	if (strcmp(time_method, "implicit") == 0) {
+	if (is_implicit) {
 	PetscCall(KSPCreate(PETSC_COMM_WORLD, &ksp));
-	PetscCall(KSPSetOperators(ksp, A, A)); // 设置系统矩阵
-	PetscCall(KSPSetTolerances(ksp, tol, PETSC_DEFAULT, PETSC_DEFAULT, max_steps));   // 设置求解器
-	PetscCall(KSPSetFromOptions(ksp));    // 允许命令行覆盖所有求解器选项
-	} 
+	PetscCall(KSPSetOperators(ksp, A, A));
+	PetscCall(KSPSetFromOptions(ksp));
+	}
 	// 4.时间步循环
-	PetscInt step = restart_data.iteration;
-	PetscReal time = restart_data.time;
-	PetscReal   norm_diff = 0.0;
-	for (step = 0; step < max_steps; step++) {
+	for (PetscInt step = start_step; step < max_steps; step++) {
 	// 更新当前时间
 	time += dt;
 	// 保存旧解
 	PetscCall(VecCopy(u, u_old));
-	// 显式欧拉法
-	if (strcmp(time_method, "explicit") == 0) {
-	PetscLogDouble solve_start, solve_end;
-	PetscTime(&solve_start);
-            
-	// 显式更新: u^{n+1} = u^n + (dt/(ρc)) * κ∇²u^n
-	PetscCall(MatMult(K, u_old, rhs));
-	PetscCall(VecScale(rhs, dt / rho_c));
-	PetscCall(VecAXPY(u, 1.0, rhs));
-	PetscTime(&solve_end);
-	solve_time_total += (solve_end - solve_start);
-	} 
-	// 隐式欧拉法
-        else {
-	PetscLogDouble solve_start, solve_end;
-	PetscTime(&solve_start);
-	// 右端项: ρc * u_old
+	// 计算源项 f(t_n+1)
+	PetscScalar *f_arr;
+	PetscCall(VecGetArray(f_vec, &f_arr));
+	PetscCall(VecGetOwnershipRange(f_vec, &Istart, &Iend));
+	for (PetscInt idx = Istart; idx < Iend; idx++) {
+	PetscInt i = idx / N;
+	PetscInt j = idx % N;
+	if (i == 0 || i == N - 1 || j == 0 || j == N - 1) {
+	f_arr[idx-Istart] = 0.0; // 边界上的源项设为0，实际值将在RHS中强制设定
+	} else if (use_mms) {
+	// For implicit: f at t_n+1; for explicit: f at t_n
+	// We use t (which is t_n+1) for simplicity in both cases.
+	f_arr[idx-Istart] = manufactured_source((PetscReal)j * h, (PetscReal)i * h, time, kappa, rho_c);
+	} else {
+	f_arr[idx-Istart] = 0.0; // 默认无源项
+		}
+	}
+	PetscCall(VecRestoreArray(f_vec, &f_arr));
+	
+	// 时间步进逻辑
+	if (is_implicit) {
+	// 隐式: (ρc*I - Δt*κ*∇²) u_new = ρc*u_old + Δt*f_new
+	// rhs = ρc * u_old + dt * f
 	PetscCall(VecCopy(u_old, rhs));
 	PetscCall(VecScale(rhs, rho_c));
-	// 求解: A u^{n+1} = rhs
-	PetscCall(KSPSolve(ksp, rhs, u));
-	PetscTime(&solve_end);
-	solve_time_total += (solve_end - solve_start);
-	}
-        
-	// 计算变化量
-	PetscCall(VecAXPY(u_old, -1.0, u));
-	PetscCall(VecNorm(u_old, NORM_2, &norm_diff));
-	if (step % 50 == 0 && rank == 0) {
-	PetscPrintf(PETSC_COMM_WORLD, "Step %4d: Time=%.4f, ||Δu||=%.2e\n", step, (double)time, (double)norm_diff);
-	}
-	// 定期保存重启文件
-	if (enable_restart && (step % restart_interval == 0)) {
-	PetscViewer viewer;
-	PetscCall(PetscViewerHDF5Open(PETSC_COMM_WORLD, restart_file, FILE_MODE_WRITE, &viewer));
-	// 保存元数据
-	restart_data.iteration = step;
-	restart_data.time = time;
-	restart_data.dt = dt;
-	restart_data.h = h;
-	restart_data.N = N;
-	restart_data.kappa = kappa;
-	restart_data.rho_c = rho_c;
+	PetscCall(VecAXPY(rhs, dt, f_vec));
 	
-	PetscCall(PetscObjectSetName((PetscObject)&restart_data, "restart_data"));
-	PetscCall(PetscViewerHDF5WriteObject(viewer, (PetscObject)&restart_data));   
-	// 保存解向量
+	// 强制执行狄利克雷边界条件
+	PetscScalar *rhs_arr;
+	PetscCall(VecGetArray(rhs, &rhs_arr));
+	PetscCall(VecGetOwnershipRange(rhs, &Istart, &Iend));
+	for(PetscInt idx = Istart; idx < Iend; idx++) {
+	PetscInt i = idx / N;
+	PetscInt j = idx % N;
+		if(i == 0 || i == N-1 || j == 0 || j == N-1){
+			if (use_mms) {
+			rhs_arr[idx-Istart] = manufactured_solution((PetscReal)j*h, (PetscReal)i*h, time);
+	} else {
+		rhs_arr[idx-Istart] = 0.0;
+			}
+		}
+	}
+	PetscCall(VecRestoreArray(rhs, &rhs_arr));
+	// 求解线性系统 Au = rhs
+	PetscCall(PetscLogEventBegin(SOLVE_TIME, 0, 0, 0, 0));
+	PetscCall(KSPSolve(ksp, rhs, u));
+	PetscCall(PetscLogEventEnd(SOLVE_TIME, 0, 0, 0, 0));
+
+	} else { // Explicit
+	// 显式: u_new = u_old + (Δt/ρc) * (A*u_old + f_old)  (其中 A=κ*∇²)
+	// rhs = A * u_old
+	PetscCall(MatMult(A, u_old, rhs));
+	// rhs = A * u_old + f
+	PetscCall(VecAXPY(rhs, 1.0, f_vec));
+	// u_new = u_old + (dt/rho_c) * rhs
+	PetscCall(VecAXPY(u, dt / rho_c, rhs));
+	
+	// 强制执行狄利克雷边界条件 (在更新之后直接设定)
+	PetscScalar *u_arr;
+	PetscCall(VecGetArray(u, &u_arr));
+	PetscCall(VecGetOwnershipRange(u, &Istart, &Iend));
+	for(PetscInt idx = Istart; idx < Iend; idx++) {
+	PetscInt i = idx / N;
+	PetscInt j = idx % N;
+	if(i == 0 || i == N-1 || j == 0 || j == N-1){
+	if (use_mms) {
+	u_arr[idx-Istart] = manufactured_solution((PetscReal)j*h, (PetscReal)i*h, time);
+	} else {
+	u_arr[idx-Istart] = 0.0;
+			}
+		}
+	}
+	PetscCall(VecRestoreArray(u, &u_arr));
+	}
+	if (step % 50 == 0 && rank == 0) {
+	PetscReal norm_u;
+	PetscCall(VecNorm(u, NORM_2, &norm_u));
+	PetscPrintf(PETSC_COMM_WORLD, "Step %4d: Time=%.4f, ||u||_2=%.2e\n", step, (double)time, (double)norm_u);
+	}
+	//统一的I/O逻辑
+	PetscBool last_step = (step == max_steps - 1);
+	if ( (enable_restart || vtk_output) && (step > 0 && step % io_interval == 0) ) {
+	// 保存VTK
+	if (vtk_output) {
+	char filename[PETSC_MAX_PATH_LEN];
+	sprintf(filename, "solution_step_%04d.vts", step);
+	PetscViewer viewer;
+	PetscCall(PetscViewerVTKOpen(PETSC_COMM_WORLD, filename, FILE_MODE_WRITE, &viewer));
 	PetscCall(VecView(u, viewer));
 	PetscCall(PetscViewerDestroy(&viewer));
+	}
+	// 定期保存重启文件
+	if (enable_restart) {
+	char filename[PETSC_MAX_PATH_LEN];
+	sprintf(filename, "restart_step_%04d.h5", step);
+	PetscViewer viewer;
+	PetscCall(PetscViewerHDF5Open(PETSC_COMM_WORLD, filename, FILE_MODE_WRITE, &viewer));
+	PetscCall(VecView(u, viewer));
+	PetscCall(PetscViewerHDF5PushGroup(viewer, "/"));
+	PetscCall(PetscViewerHDF5WriteAttribute(viewer, "N", "N", PETSC_INT, &N));
+	PetscCall(PetscViewerHDF5WriteAttribute(viewer, "dt", "dt", PETSC_REAL, &dt));
+	PetscCall(PetscViewerHDF5WriteAttribute(viewer, "kappa", "kappa", PETSC_REAL, &kappa));
+	PetscCall(PetscViewerHDF5WriteAttribute(viewer, "rho_c", "rho_c", PETSC_REAL, &rho_c));
+	PetscCall(PetscViewerHDF5WriteAttribute(viewer, "time", "time", PETSC_REAL, &time));
+	PetscCall(PetscViewerHDF5WriteAttribute(viewer, "iteration", "iteration", PETSC_INT, &step));
+	PetscCall(PetscViewerHDF5PopGroup(viewer));
+	// 保存解向量
+	PetscCall(PetscViewerDestroy(&viewer));
 	if (rank == 0) {
-	PetscPrintf(PETSC_COMM_WORLD, "Saved restart file at step %d\n", step);
-		}
+	PetscPrintf(PETSC_COMM_WORLD, "Saved restart file: %s\n", filename);
+                }
+            }
+        }
+    }
+	
+	// --- MODIFICATION ---: 改进MMS误差计算说明
+	if (use_mms) {
+	Vec u_exact_vec;
+	PetscCall(VecDuplicate(u, &u_exact_vec));
+	PetscScalar *exact_arr;
+	PetscCall(VecGetArray(u_exact_vec, &exact_arr));
+	PetscCall(VecGetOwnershipRange(u_exact_vec, &Istart, &Iend));
+	for (PetscInt idx = Istart; idx < Iend; idx++) {
+	PetscInt i = idx / N;
+	PetscInt j = idx % N;
+	exact_arr[idx - Istart] = manufactured_solution((PetscReal)j * h, (PetscReal)i * h, time);
 	}
-	// 简单收敛检查
-	if (norm_diff < tol && step > 10) {
-		break;
-		}
-	}
-	// 结束总时间测量
-	PetscTime(&total_time_end);
-	double total_elapsed_time = (double)(total_time_end - total_time_start);
+	PetscCall(VecRestoreArray(u_exact_vec, &exact_arr));
+	PetscReal err_norm;
+	PetscCall(VecAXPY(u, -1.0, u_exact_vec)); // u = u_num - u_exact
+	PetscCall(VecNorm(u, NORM_INFINITY, &err_norm));
+        
 	// 5.结果输出 
 	if (rank == 0) {
-	PetscPrintf(PETSC_COMM_WORLD, "\n===== Results =====\n");
-	PetscPrintf(PETSC_COMM_WORLD, "Total steps: %d, Final time: %.4f\n", step, (double)time);
-	PetscPrintf(PETSC_COMM_WORLD, "Final change norm: %.4e\n", (double)norm_diff);
-	PetscPrintf(PETSC_COMM_WORLD, "Total solve time: %.4f sec\n", (double)solve_time_total);
-	PetscPrintf(PETSC_COMM_WORLD, "Total elapsed time: %.4f sec\n", total_elapsed_time);
-	}
+	PetscPrintf(PETSC_COMM_WORLD, "\n===== MMS Verification =====\n");
+	PetscPrintf(PETSC_COMM_WORLD, "L-infinity error ||u_num - u_exact||_∞ at T=%.4f is: %.4e\n", (double)time, (double)err_norm);
+	PetscPrintf(PETSC_COMM_WORLD, "To determine convergence orders α and β (e ≈ C₁Δx^α + C₂Δt^β),\n");
+	PetscPrintf(PETSC_COMM_WORLD, "you need to run this code multiple times with different -n and -dt values and analyze the resulting errors.\n");
+        }
+        PetscCall(VecDestroy(&u_exact_vec));
+        }
 	// 查看最终解
-	if (view_exact) {
+	if (view_solution) {
 	PetscPrintf(PETSC_COMM_WORLD, "===== Final Solution =====\n");
 	VecView(u, PETSC_VIEWER_STDOUT_WORLD);
 	}
-    
-	// 防御性资源清理
-	if (u) PetscCall(VecDestroy(&u));
-	if (u_old) PetscCall(VecDestroy(&u_old));
-	if (rhs) PetscCall(VecDestroy(&rhs));
-	if (A) PetscCall(MatDestroy(&A));
-	if (K) PetscCall(MatDestroy(&K));
+	// 清理
+	PetscCall(VecDestroy(&u));
+	PetscCall(VecDestroy(&u_old));
+	PetscCall(VecDestroy(&rhs));
+	PetscCall(VecDestroy(&f_vec));
+	PetscCall(MatDestroy(&A));
 	if (ksp) PetscCall(KSPDestroy(&ksp));
-	PetscFinalize();
+	PetscCall(PetscFinalize());
 	return 0;
 	}
+
+	// MMS相关函数实现 (保持不变)
+	PetscScalar manufactured_solution(PetscReal x, PetscReal y, PetscReal t) {
+	return sin(M_PI * x) * sin(M_PI * y) * exp(-t);
+	}
+
+	PetscScalar manufactured_source(PetscReal x, PetscReal y, PetscReal t, PetscReal kappa, PetscReal rho_c) {
+	// f = ρc * ∂u/∂t - κ * (∂²u/∂x² + ∂²u/∂y²)
+	PetscScalar u_t = -sin(M_PI * x) * sin(M_PI * y) * exp(-t);
+	PetscScalar laplacian_u = -2.0 * M_PI * M_PI * sin(M_PI * x) * sin(M_PI * y) * exp(-t);
+	return rho_c * u_t - kappa * laplacian_u;
+	}
+
+
+	
