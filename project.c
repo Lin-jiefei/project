@@ -317,10 +317,16 @@ int main(int argc, char **argv) {
 	}
 	PetscCall(VecRestoreArray(u, &u_arr));
 	}
-	if (step % 50 == 0 && rank == 0) {
+
+	if (step % 50 == 0) {
 	PetscReal norm_u;
-	PetscCall(VecNorm(u, NORM_2, &norm_u));
+	// 集体操作：所有进程都必须执行
+	PetscCall(VecNorm(u, NORM_2, &norm_u)); 
+
+	// 单进程操作：只有0号进程执行，以避免重复打印
+	if (rank == 0) { 
 	PetscPrintf(PETSC_COMM_WORLD, "Step %4d: Time=%.4f, ||u||_2=%.2e\n", step, (double)time, (double)norm_u);
+		}
 	}
 	//统一的I/O逻辑
 	if ( (enable_restart || vtk_output) && (step > 0 && step % io_interval == 0) ) {
