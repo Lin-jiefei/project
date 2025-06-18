@@ -408,32 +408,45 @@
 	}
 
 	//*在所有时间步结束后，如果使用了-mms选项，则计算数值解与精确解的误差。
+	/*
+     * MMS误差计算
+     * 在所有时间步结束后，如果使用了-mms选项，则计算数值解与精确解的误差。
+     */
 	if (use_mms) {
-	Vec u_exact_vec;
-	PetscCall(VecDuplicate(u, &u_exact_vec));
-	PetscScalar *exact_arr;
-	PetscCall(VecGetArray(u_exact_vec, &exact_arr));
-	PetscCall(VecGetOwnershipRange(u_exact_vec, &Istart, &Iend));
-	// 遍历网格，计算每个点的精确解
+	Vec u_exact;
+	PetscCall(VecDuplicate(u, &u_exact)); // 创建一个具有相同DMDA布局的向量
+
+	// 【关键点1】变量必须被声明为二维数组指针 (PetscScalar **)
+	PetscScalar **exact_arr;
+
+	// 【关键点2】必须使用 DMDAVecGetArray 函数，它才能正确返回二维数组指针
+	PetscCall(DMDAVecGetArray(da, u_exact, &exact_arr));
+
+	// 遍历网格，计算每个点的精确解。重用之前获取的局部网格信息'info'。
 	for (PetscInt j = info.ys; j < info.ys + info.ym; j++) {
 		for (PetscInt i = info.xs; i < info.xs + info.xm; i++) {
+		// 【关键点3】现在这个二维访问才是合法的
 		exact_arr[j][i] = manufactured_solution((PetscReal)i * h, (PetscReal)j * h, time);
 		}
 	}
-	PetscCall(VecRestoreArray(u_exact_vec, &exact_arr));
+        
+	// 【关键点4】用完后必须用对应的Restore函数释放二维数组指针
+	PetscCall(DMDAVecRestoreArray(da, u_exact, &exact_arr));
+        
+	// 计算误差: u = u - u_exact (结果存储在u中)
+	PetscCall(VecAXPY(u, -1.0, u_exact));
+        
+	// 计算误差的无穷范数 (最大绝对值误差)
 	PetscReal err_norm;
-	PetscCall(VecAXPY(u, -1.0, u_exact_vec)); // u = u_num - u_exact
 	PetscCall(VecNorm(u, NORM_INFINITY, &err_norm));
-	
-	// 5.结果输出 
+        
 	if (rank == 0) {
-	PetscPrintf(PETSC_COMM_WORLD, "\n===== MMS Verification =====\n");
-	PetscPrintf(PETSC_COMM_WORLD, "L-infinity error ||u_num - u_exact||_∞ at T=%.4f is: %.4e\n", (double)time, (double)err_norm);
-	PetscPrintf(PETSC_COMM_WORLD, "To determine convergence orders α and β (e ≈ C₁Δx^α + C₂Δt^β),\n");
-	PetscPrintf(PETSC_COMM_WORLD, "you need to run this code multiple times with different -n and -dt values and analyze the resulting errors.\n");
-        }
-        PetscCall(VecDestroy(&u_exact_vec));
-        }
+	PetscPrintf(PETSC_COMM_WORLD, "\n===== MMS 验证 =====\n");
+	PetscPrintf(PETSC_COMM_WORLD, "在时间 T=%.4f 时的 L-infinity 误差 ||u_num - u_exact||_∞ 为: %.4e\n", (double)time, (double)err_norm);
+	PetscPrintf(PETSC_COMM_WORLD, "要确定收敛阶，您需要使用不同的 -n 和 -dt 值多次运行此程序并分析误差变化。\n");
+	}
+	PetscCall(VecDestroy(&u_exact));
+	}
 	// 查看最终解
 	if (view_solution) {
 	PetscPrintf(PETSC_COMM_WORLD, "===== Final Solution =====\n");
