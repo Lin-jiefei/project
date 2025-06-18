@@ -57,7 +57,7 @@ int main(int argc, char **argv) {
 	char time_method[20] = "implicit"; // 默认时间方法
 	// 重启与可视化参数
 	PetscBool   enable_restart = PETSC_FALSE;
-	PetscInt    restart_interval = 10;
+	PetscInt    io_interval = 10;
 	char        restart_load_file[PETSC_MAX_PATH_LEN] = "";
 	PetscBool   restart_load_flag = PETSC_FALSE;
 	PetscBool   vtk_output     = PETSC_FALSE;
@@ -167,7 +167,6 @@ int main(int argc, char **argv) {
 	// 内部点
 	PetscInt    cols[5];
 	PetscScalar vals[5];
-	PetscInt    ncols = 0;
 	// 对角线
 	if (is_implicit) {
                 // IMPLICIT: A = (ρc*I - Δt*κ*∇²)
@@ -324,7 +323,6 @@ int main(int argc, char **argv) {
 	PetscPrintf(PETSC_COMM_WORLD, "Step %4d: Time=%.4f, ||u||_2=%.2e\n", step, (double)time, (double)norm_u);
 	}
 	//统一的I/O逻辑
-	PetscBool last_step = (step == max_steps - 1);
 	if ( (enable_restart || vtk_output) && (step > 0 && step % io_interval == 0) ) {
 	// 保存VTK
 	if (vtk_output) {
@@ -388,7 +386,7 @@ int main(int argc, char **argv) {
 	// 查看最终解
 	if (view_solution) {
 	PetscPrintf(PETSC_COMM_WORLD, "===== Final Solution =====\n");
-	VecView(u, PETSC_VIEWER_STDOUT_WORLD);
+	PetscCall(VecView(u, PETSC_VIEWER_STDOUT_WORLD));
 	}
 	// 清理
 	PetscCall(VecDestroy(&u));
