@@ -377,9 +377,16 @@ PetscCall(VecAssemblyEnd(u));
 	PetscPrintf(PETSC_COMM_WORLD, "Step %5d: Time=%8.4f, ||u||_2 = %9.2e\n", step, (double)time, (double)norm_u);
 		}
 	}
-        
+        PetscReal norm_initial;
+    PetscCall(VecNorm(u, NORM_2, &norm_initial));
+    
+
         // 4. 定期保存可视化或重启文件
 	if ( (vtk_output || enable_restart) && (step % io_interval == 0 || step == max_steps - 1) ) {
+	
+    if (rank == 0) {
+        PetscPrintf(PETSC_COMM_WORLD, "DEBUG: At step=%d, about to save file. Current norm = %g\n", step, (double)norm_current);
+    }
 		if (vtk_output) {
 		char filename[PETSC_MAX_PATH_LEN];
 		sprintf(filename, "solution_step_%04d.vts", step);
