@@ -1,0 +1,15 @@
+#!/bin/bash
+#BSUB -J test
+#BSUB -q short
+#BSUB -n 40
+#BSUB -e %J.err
+#BSUB -o %J.out
+#BSUB -R "span[ptile=40]"
+
+hostfile='echo $LSB_DJOB_HOSTFILE'
+NP='cat $hostfile | wc -l'
+
+
+
+mpirun -np 40 rhoSimpleFoam -parallel > $LSB_JOBID.log 2>&1
+
