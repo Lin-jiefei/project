@@ -1,8 +1,8 @@
 # -*- mode: makefile -*-
 # 项目配置
-PROJECT_DIR = /work/mae-linjf/project/project
-PETSC_DIR = /work/mae-zhaocr/lib/petsc-3.18.6-opt
-PETSC_ARCH = .
+PROJECT_DIR = /home/linjiefei/project
+PETSC_DIR = /home/linjiefei/petsc
+PETSC_ARCH = arch-linux-c-debug
 TARGET = heat_solver
 SOURCE = project.c
 
@@ -12,20 +12,14 @@ PACKAGES := $(petsc.pc)
 
 # 编译器设置
 CC := $(shell pkg-config --variable=ccompiler $(PACKAGES))
-CXX := $(shell pkg-config --variable=cxxcompiler $(PACKAGES))
-FC := $(shell pkg-config --variable=fcompiler $(PACKAGES))
-CFLAGS_OTHER := $(shell pkg-config --cflags-only-other $(PACKAGES))
-CFLAGS := $(shell pkg-config --variable=cflags_extra $(PACKAGES)) $(CFLAGS_OTHER)
-CXXFLAGS := $(shell pkg-config --variable=cxxflags_extra $(PACKAGES)) $(CFLAGS_OTHER)
-FFLAGS := $(shell pkg-config --variable=fflags_extra $(PACKAGES))
+CFLAGS := $(shell pkg-config --variable=cflags_extra $(PACKAGES)) \
+          $(shell pkg-config --cflags-only-other $(PACKAGES))
 CPPFLAGS := $(shell pkg-config --cflags-only-I $(PACKAGES))
 LDFLAGS := $(shell pkg-config --libs-only-L --libs-only-other $(PACKAGES))
-LDFLAGS += $(patsubst -L%, $(shell pkg-config --variable=ldflag_rpath $(PACKAGES))%, $(shell pkg-config --libs-only-L $(PACKAGES)))
+LDFLAGS += $(patsubst -L%, $(shell pkg-config --variable=ldflag_rpath $(PACKAGES))%, \
+           $(shell pkg-config --libs-only-L $(PACKAGES)))
 LDLIBS := $(shell pkg-config --libs-only-l $(PACKAGES)) -lm
-CUDAC := $(shell pkg-config --variable=cudacompiler $(PACKAGES))
-CUDAC_FLAGS := $(shell pkg-config --variable=cudaflags_extra $(PACKAGES))
-CUDA_LIB := $(shell pkg-config --variable=cudalib $(PACKAGES))
-CUDA_INCLUDE := $(shell pkg-config --variable=cudainclude $(PACKAGES))
+
 # 添加防御性编译标志
 CFLAGS += -Wall -Wextra -Werror -pedantic -Wformat-security
 
@@ -37,12 +31,12 @@ OBJ := $(patsubst %.c,%.o,$(SOURCE))
 all: $(TARGET)
 
 $(TARGET): $(OBJ)
-	$(LINK.cc) $(LDLIBS) -o $@ $^
+	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 	@echo "\033[32m编译成功! 可执行文件位置: $(PROJECT_DIR)/$(TARGET)\033[0m"
 	@echo "\033[33m运行命令示例: mpirun -n 4 ./$(TARGET) -n 100 -dt 0.001 -time_method implicit\033[0m"
 
 $(OBJ): $(SRC_PATH)
-	$(COMPILE.c) -c $(SRC_PATH) -o $@
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c $(SRC_PATH) -o $@
 
 clean:
 	$(RM) $(TARGET) $(OBJ)
