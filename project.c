@@ -362,7 +362,12 @@
 		}
 	}
 	PetscCall(DMDAVecRestoreArray(da, u, &u_arr_explicit));
+	PetscCall(VecAssemblyBegin(u));
+PetscCall(VecAssemblyEnd(u));
 	}
+
+
+
 
 	// 3. 定期打印计算状态
 	if (step % 50 == 0) {
